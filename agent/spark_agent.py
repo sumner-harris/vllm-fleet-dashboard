@@ -37,7 +37,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
 CACHE_TTL = 2.0  # seconds; collapses dashboard polls into one collection
 
 # --------------------------------------------------------------------------
@@ -264,29 +264,21 @@ def board_model() -> str | None:
 # --------------------------------------------------------------------------
 
 VLLM_HINTS = ("vllm", "openai.api_server", "vllm-openai")
-INSPECT_FMT = (
-    "{{json (dict "
-    '"id" .Id '
-    '"name" .Name '
-    '"image" .Config.Image '
-    '"cmd" .Config.Cmd '
-    '"entrypoint" .Config.Entrypoint '
-    '"args" .Args '
-    '"env" .Config.Env '
-    '"labels" .Config.Labels '
-    '"ports" .NetworkSettings.Ports '
-    '"exposed" .Config.ExposedPorts '
-    '"netmode" .HostConfig.NetworkMode '
-    '"state" .State.Status '
-    '"health" .State.Health '
-    '"started" .State.StartedAt '
-    '"restarts" .RestartCount '
-    ") }}"
-)
+INSPECT_CHUNK = 40  # keep argv and output size sane on busy hosts
 
 
 def docker_available() -> bool:
     return bool(shutil.which("docker"))
+
+
+def dig(obj, *path, default=None):
+    """Walk a nested dict safely; docker inspect output varies by version."""
+    cur = obj
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return default if cur is None else cur
 
 
 def collect_containers() -> tuple[list[dict], str | None]:
@@ -299,79 +291,87 @@ def collect_containers() -> tuple[list[dict], str | None]:
     if not ids:
         return [], None
 
-    code, out, err = run(
-        ["docker", "inspect", "--format", INSPECT_FMT, *ids], timeout=15.0
-    )
-    if code != 0:
-        return [], (err or out).strip()[:300] or "docker inspect failed"
-
-    containers = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
+    containers, errors = [], []
+    for i in range(0, len(ids), INSPECT_CHUNK):
+        chunk = ids[i : i + INSPECT_CHUNK]
+        # No --format: plain `docker inspect` emits a JSON array on every
+        # version. (An earlier build used a Go template with `dict`, which
+        # docker's template engine does not define.)
+        code, out, err = run(["docker", "inspect", *chunk], timeout=20.0)
+        if code != 0:
+            errors.append((err or out).strip()[:200])
             continue
         try:
-            raw = json.loads(line)
-        except json.JSONDecodeError:
+            raws = json.loads(out)
+        except json.JSONDecodeError as exc:
+            errors.append(f"could not parse docker inspect output: {exc}")
             continue
-        containers.append(normalize_container(raw))
-    return containers, None
+        for raw in raws:
+            try:
+                containers.append(normalize_container(raw))
+            except Exception as exc:  # one odd container must not kill the rest
+                errors.append(f"{raw.get('Id', '?')[:12]}: {exc}"[:200])
+    return containers, "; ".join(errors)[:300] or None
 
 
 def normalize_container(raw: dict) -> dict:
-    argv = []
-    for key in ("entrypoint", "cmd", "args"):
-        val = raw.get(key)
-        if isinstance(val, list):
-            argv.extend(str(v) for v in val)
+    cfg = raw.get("Config") or {}
+    state = raw.get("State") or {}
+
+    argv: list[str] = []
+    for value in (cfg.get("Entrypoint"), cfg.get("Cmd"), raw.get("Args")):
+        if isinstance(value, list):
+            argv.extend(str(v) for v in value)
     blob = " ".join(argv).lower()
-    image = (raw.get("image") or "").lower()
-    env_list = raw.get("env") or []
+    image = str(cfg.get("Image") or "").lower()
+
     env = {}
-    for item in env_list:
+    for item in cfg.get("Env") or []:
         key, _, value = str(item).partition("=")
         env[key] = value
 
-    is_vllm = any(h in blob for h in VLLM_HINTS) or any(h in image for h in VLLM_HINTS)
-    if not is_vllm:
-        is_vllm = any(k.startswith("VLLM_") for k in env)
+    is_vllm = (
+        any(h in blob for h in VLLM_HINTS)
+        or any(h in image for h in VLLM_HINTS)
+        or any(k.startswith("VLLM_") for k in env)
+    )
 
     ports = []
-    port_map = raw.get("ports") or {}
-    if isinstance(port_map, dict):
-        for container_port, bindings in port_map.items():
-            cport = to_num(str(container_port).split("/")[0])
-            for binding in bindings or []:
-                hport = to_num(binding.get("HostPort"))
-                if hport:
-                    ports.append(
-                        {
-                            "host_ip": binding.get("HostIp") or "0.0.0.0",
-                            "host_port": hport,
-                            "container_port": cport,
-                        }
-                    )
-    # --network host publishes nothing; recover the port from argv/env.
+    for container_port, bindings in (dig(raw, "NetworkSettings", "Ports", default={}) or {}).items():
+        cport = to_num(str(container_port).split("/")[0])
+        for binding in bindings or []:
+            hport = to_num((binding or {}).get("HostPort"))
+            if hport:
+                ports.append(
+                    {
+                        "host_ip": (binding or {}).get("HostIp") or "0.0.0.0",
+                        "host_port": hport,
+                        "container_port": cport,
+                    }
+                )
+
+    netmode = str(dig(raw, "HostConfig", "NetworkMode", default="") or "")
+    # --network host publishes nothing, so recover the port from argv/env.
     arg_port = argv_flag(argv, "--port") or env.get("VLLM_PORT") or env.get("PORT")
     if not ports and to_num(arg_port):
         ports.append(
             {"host_ip": "0.0.0.0", "host_port": to_num(arg_port), "container_port": to_num(arg_port)}
         )
-    if not ports and is_vllm and str(raw.get("netmode", "")).startswith("host"):
+    if not ports and is_vllm and netmode.startswith("host"):
         ports.append({"host_ip": "0.0.0.0", "host_port": 8000, "container_port": 8000})
 
-    health = raw.get("health") or {}
-    started = raw.get("started")
+    status = state.get("Status")
+    started = state.get("StartedAt")
     return {
-        "id": (raw.get("id") or "")[:12],
-        "name": (raw.get("name") or "").lstrip("/"),
-        "image": raw.get("image"),
-        "state": raw.get("state"),
-        "health": (health or {}).get("Status"),
+        "id": str(raw.get("Id") or "")[:12],
+        "name": str(raw.get("Name") or "").lstrip("/"),
+        "image": cfg.get("Image"),
+        "state": status,
+        "health": dig(state, "Health", "Status"),
         "started_at": started,
-        "uptime_s": iso_age(started) if raw.get("state") == "running" else None,
-        "restarts": to_num(raw.get("restarts"), 0),
-        "network_mode": raw.get("netmode"),
+        "uptime_s": iso_age(started) if status == "running" else None,
+        "restarts": to_num(raw.get("RestartCount"), 0),
+        "network_mode": netmode,
         "ports": ports,
         "is_vllm": is_vllm,
         "model_arg": argv_flag(argv, "--model") or env.get("MODEL"),

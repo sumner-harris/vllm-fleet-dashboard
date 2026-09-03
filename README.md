@@ -60,6 +60,9 @@ curl -s localhost:9900/stats | python3 -m json.tool | head -40
 The agent is one stdlib-only Python file — no pip install, no container. It needs to
 run as a user that can execute `docker ps` and `nvidia-smi` (root by default).
 
+Re-running the installer later upgrades an agent in place — it reinstalls the file
+and restarts the service.
+
 Open the port to the dashboard host only:
 
 ```bash
@@ -232,6 +235,7 @@ curl -s localhost:8080/api/fleet?history=false \
 | Node shows *offline* | Agent not running, or port 9900 blocked. `systemctl status vllm-fleet-agent` on that box. |
 | Node *degraded*, "vLLM not answering on port N" | The container is up but the server isn't accepting requests — still loading weights, or it crashed. Check `docker logs`. |
 | "no vLLM server found on this node" | The agent looks for containers whose image or command mentions vLLM. If yours is named something else, set `FLEET_VLLM_PORTS=8000,8001` in the unit file. |
+| `template parsing error: function "dict" not defined` | Agent older than 1.2.0. Upgrade it: re-run `sudo bash agent/install-agent.sh 9900` on that node. |
 | GPU stats missing, everything else fine | `nvidia-smi` isn't on PATH for the agent's user, or the agent isn't running as root. |
 | tok/s shows `–` | Needs two consecutive polls to derive a rate; it fills in after ~20s. |
 | Refresh button missing | That browser has no admin token — open the `?admin=<token>` link once. |

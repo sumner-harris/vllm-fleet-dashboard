@@ -18,7 +18,9 @@ if [ -n "$TOKEN" ]; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now vllm-fleet-agent
+systemctl enable vllm-fleet-agent
+# restart, not just start, so re-running this script upgrades an existing agent
+systemctl restart vllm-fleet-agent
 sleep 1
 systemctl --no-pager --lines=5 status vllm-fleet-agent || true
 
