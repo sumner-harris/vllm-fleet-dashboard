@@ -1,0 +1,20 @@
+# Optional: put the dashboard behind a real hostname with HTTPS.
+# Install Caddy on the dashboard host, drop this in /etc/caddy/Caddyfile,
+# adjust the name, then: sudo systemctl reload caddy
+#
+# With an internal CA-signed cert (typical inside a lab), point tls at your files.
+# With a publicly resolvable name, delete the tls line and Caddy gets one itself.
+
+fleet.your-lab.ornl.gov {
+    tls /etc/ssl/certs/fleet.crt /etc/ssl/private/fleet.key
+
+    encode gzip
+    reverse_proxy 127.0.0.1:8080
+
+    log {
+        output file /var/log/caddy/fleet.log
+    }
+}
+
+# Then bind the dashboard to localhost only, so the proxy is the only way in:
+#   ExecStart=... uvicorn server.app:app --host 127.0.0.1 --port 8080 --proxy-headers

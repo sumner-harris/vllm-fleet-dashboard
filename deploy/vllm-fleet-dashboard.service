@@ -1,0 +1,27 @@
+[Unit]
+Description=vLLM Fleet Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vllm-fleet-dashboard
+Environment=FLEET_CONFIG=/opt/vllm-fleet-dashboard/config.yaml
+# Admin token lives here, not in the config file others may read:
+# Environment=FLEET_ADMIN_TOKEN=change-me
+ExecStart=/opt/vllm-fleet-dashboard/venv/bin/uvicorn server.app:app --host 0.0.0.0 --port 8080 --proxy-headers
+Restart=always
+RestartSec=5
+User=fleetdash
+Group=fleetdash
+# The dashboard only makes outbound HTTP calls and writes its history file.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/vllm-fleet-dashboard
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

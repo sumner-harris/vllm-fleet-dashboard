@@ -1,0 +1,17 @@
+services:
+  fleet-dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: vllm-fleet-dashboard:latest
+    container_name: vllm-fleet-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+      - fleet-history:/data
+    environment:
+      - FLEET_CONFIG=/app/config.yaml
+volumes:
+  fleet-history:

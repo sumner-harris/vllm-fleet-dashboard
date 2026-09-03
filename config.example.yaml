@@ -1,0 +1,53 @@
+# vLLM Fleet Dashboard — machine inventory
+# Copy to config.yaml and edit. Restart the dashboard after changing it.
+
+title: "CNMS vLLM Fleet"
+
+poll_interval_s: 10      # how often to poll every node
+request_timeout_s: 5     # per-request timeout when talking to an agent
+history_points: 720      # 720 x 10s = 2 hours of sparkline history
+agent_port: 9900         # default agent port (override per node below)
+
+# Optional: survives a dashboard restart. Comment out to keep history in RAM only.
+history_file: "./fleet-history.json"
+
+# Optional shared secret. If set here (or per node), it must match
+# FLEET_AGENT_TOKEN on the agents.
+# agent_token: "change-me"
+
+# Admin token for the control endpoints (POST /api/refresh). Viewing is always open
+# to anyone who can reach the host. Prefer setting FLEET_ADMIN_TOKEN in the systemd
+# unit instead of here — deploy/install-dashboard.sh does that for you — so the
+# token isn't in a file other people may read.
+# admin_token: "change-me"
+
+nodes:
+  - name: spark-01
+    host: 192.168.1.101      # IP or DNS name the dashboard uses to reach the agent
+    agent_port: 9900
+    note: "GB10 · lab bench"
+    # public_host: spark-01.lan   # what the copy-ready endpoint URLs should say
+    #                             # (defaults to `host`)
+
+  - name: spark-02
+    host: 192.168.1.102
+    note: "GB10"
+    # expect_vllm: false   # a machine that serves nothing by design: stays "online"
+    #                      # instead of being flagged for a missing server
+
+  - name: spark-03
+    host: 192.168.1.103
+
+  - name: zgx-01
+    host: 192.168.1.111
+    note: "HP ZGX"
+
+  - name: zgx-02
+    host: 192.168.1.112
+
+  # A node with no agent installed: the dashboard still shows models, ports,
+  # throughput and KV cache by talking to vLLM directly — but no GPU stats.
+  # - name: spare
+  #   host: 192.168.1.120
+  #   agent: false
+  #   vllm_ports: [8000, 8001]

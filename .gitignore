@@ -1,0 +1,12 @@
+# Your actual inventory — internal hostnames and IPs. Keep it off the remote.
+config.yaml
+
+# Runtime state
+fleet-history.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/

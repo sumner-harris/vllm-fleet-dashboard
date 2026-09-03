@@ -1,0 +1,20 @@
+[Unit]
+Description=vLLM Fleet node agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/vllm-fleet-agent/spark_agent.py --port 9900
+Restart=always
+RestartSec=5
+# Uncomment and set the same value on every node + in config.yaml to require auth:
+# Environment=FLEET_AGENT_TOKEN=change-me
+# Extra ports to probe when vLLM runs outside Docker:
+# Environment=FLEET_VLLM_PORTS=8000,8001
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

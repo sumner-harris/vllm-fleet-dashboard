@@ -1,0 +1,10 @@
+# Points the dashboard at tools/fake_fleet.py instead of real hardware.
+title: "vLLM Fleet (simulated)"
+poll_interval_s: 3
+history_points: 720
+nodes:
+  - {name: spark-01, host: 127.0.0.1, agent_port: 19901, public_host: 192.168.1.101, note: "GB10 · bench"}
+  - {name: spark-02, host: 127.0.0.1, agent_port: 19902, public_host: 192.168.1.102, note: "GB10"}
+  - {name: spark-03, host: 127.0.0.1, agent_port: 19903, public_host: 192.168.1.103}
+  - {name: zgx-01,   host: 127.0.0.1, agent_port: 19904, public_host: 192.168.1.111, note: "HP ZGX"}
+  - {name: zgx-02,   host: 127.0.0.1, agent_port: 19905, public_host: 192.168.1.112, note: "HP ZGX"}
