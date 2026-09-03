@@ -37,7 +37,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "1.2.0"
+AGENT_VERSION = "1.3.0"
 CACHE_TTL = 2.0  # seconds; collapses dashboard polls into one collection
 
 # --------------------------------------------------------------------------
@@ -264,6 +264,11 @@ def board_model() -> str | None:
 # --------------------------------------------------------------------------
 
 VLLM_HINTS = ("vllm", "openai.api_server", "vllm-openai")
+OLLAMA_HINTS = ("ollama",)
+# Open WebUI talks TO Ollama and carries OLLAMA_* env vars, so it must be
+# classified before Ollama or it would be probed as a model server.
+WEBUI_HINTS = ("open-webui", "openwebui", "open_webui")
+DEFAULT_OLLAMA_PORT = 11434
 INSPECT_CHUNK = 40  # keep argv and output size sane on busy hosts
 
 
@@ -335,6 +340,21 @@ def normalize_container(raw: dict) -> dict:
         or any(h in image for h in VLLM_HINTS)
         or any(k.startswith("VLLM_") for k in env)
     )
+    name_l = str(raw.get("Name") or "").lower()
+    is_webui = any(h in image or h in blob or h in name_l for h in WEBUI_HINTS)
+    is_ollama = not is_vllm and not is_webui and (
+        any(h in blob for h in OLLAMA_HINTS)
+        or any(h in image for h in OLLAMA_HINTS)
+        or any(k.startswith("OLLAMA_") for k in env)
+    )
+    if is_webui:
+        engine = "webui"
+    elif is_vllm:
+        engine = "vllm"
+    elif is_ollama:
+        engine = "ollama"
+    else:
+        engine = None
 
     ports = []
     for container_port, bindings in (dig(raw, "NetworkSettings", "Ports", default={}) or {}).items():
@@ -353,12 +373,20 @@ def normalize_container(raw: dict) -> dict:
     netmode = str(dig(raw, "HostConfig", "NetworkMode", default="") or "")
     # --network host publishes nothing, so recover the port from argv/env.
     arg_port = argv_flag(argv, "--port") or env.get("VLLM_PORT") or env.get("PORT")
+    if engine == "ollama":
+        # Ollama takes its bind address from OLLAMA_HOST, e.g. "0.0.0.0:11434".
+        arg_port = arg_port or host_port_of(env.get("OLLAMA_HOST"))
+    elif engine == "webui":
+        arg_port = arg_port or host_port_of(env.get("WEBUI_URL")) or "8080"
     if not ports and to_num(arg_port):
         ports.append(
             {"host_ip": "0.0.0.0", "host_port": to_num(arg_port), "container_port": to_num(arg_port)}
         )
-    if not ports and is_vllm and netmode.startswith("host"):
-        ports.append({"host_ip": "0.0.0.0", "host_port": 8000, "container_port": 8000})
+    if not ports and netmode.startswith("host"):
+        default_port = {"ollama": DEFAULT_OLLAMA_PORT, "webui": 8080}.get(engine, 8000)
+        if engine:
+            ports.append({"host_ip": "0.0.0.0", "host_port": default_port,
+                          "container_port": default_port})
 
     status = state.get("Status")
     started = state.get("StartedAt")
@@ -374,12 +402,21 @@ def normalize_container(raw: dict) -> dict:
         "network_mode": netmode,
         "ports": ports,
         "is_vllm": is_vllm,
+        "engine": engine,
         "model_arg": argv_flag(argv, "--model") or env.get("MODEL"),
         "served_model_name": argv_flag(argv, "--served-model-name"),
         "tensor_parallel_size": to_num(argv_flag(argv, "--tensor-parallel-size")),
         "gpu_memory_utilization": to_num(argv_flag(argv, "--gpu-memory-utilization")),
         "max_model_len": to_num(argv_flag(argv, "--max-model-len")),
     }
+
+
+def host_port_of(value: str | None) -> str | None:
+    """Pull the port out of an OLLAMA_HOST-style value ("0.0.0.0:11434", ":11434")."""
+    if not value:
+        return None
+    tail = str(value).rsplit(":", 1)[-1].strip("/")
+    return tail if tail.isdigit() else None
 
 
 def argv_flag(argv: list[str], flag: str) -> str | None:
@@ -391,7 +428,8 @@ def argv_flag(argv: list[str], flag: str) -> str | None:
     return None
 
 
-def iso_age(stamp: str | None) -> int | None:
+def iso_delta(stamp: str | None) -> int | None:
+    """Signed seconds between an ISO timestamp and now: positive = in the past."""
     if not stamp:
         return None
     text = str(stamp).strip()
@@ -401,11 +439,24 @@ def iso_age(stamp: str | None) -> int | None:
     try:
         import datetime as _dt
 
-        started = _dt.datetime.fromisoformat(text)
-        now = _dt.datetime.now(_dt.timezone.utc)
-        return max(0, int((now - started).total_seconds()))
+        moment = _dt.datetime.fromisoformat(text)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=_dt.timezone.utc)
+        return int((_dt.datetime.now(_dt.timezone.utc) - moment).total_seconds())
     except Exception:
         return None
+
+
+def iso_age(stamp: str | None) -> int | None:
+    """Seconds since an ISO timestamp (container start time)."""
+    delta = iso_delta(stamp)
+    return None if delta is None else max(0, delta)
+
+
+def iso_until(stamp: str | None) -> int | None:
+    """Seconds from now until an ISO timestamp (Ollama's expires_at)."""
+    delta = iso_delta(stamp)
+    return None if delta is None else max(0, -delta)
 
 
 # --------------------------------------------------------------------------
@@ -414,26 +465,36 @@ def iso_age(stamp: str | None) -> int | None:
 # --------------------------------------------------------------------------
 
 
-def candidate_ports(containers: list[dict]) -> list[tuple[int, dict | None]]:
-    seen: dict[int, dict | None] = {}
+def candidate_servers(containers: list[dict]) -> list[tuple[int, dict | None, str, bool]]:
+    """(port, container, engine, implicit) for every model server worth probing."""
+    seen: dict[int, tuple[dict | None, str, bool]] = {}
     for c in containers:
-        if not c["is_vllm"] or c["state"] != "running":
+        if c["state"] != "running" or c.get("engine") not in ("vllm", "ollama"):
             continue
         for p in c["ports"]:
             port = p.get("host_port")
             if port and port not in seen:
-                seen[port] = c
-    for raw in (os.environ.get("FLEET_VLLM_PORTS") or "").split(","):
-        port = to_num(raw.strip())
-        if port and port not in seen:
-            seen[port] = None
-    return sorted(seen.items())
+                seen[port] = (c, c["engine"], False)
+
+    for env_name, engine in (("FLEET_VLLM_PORTS", "vllm"), ("FLEET_OLLAMA_PORTS", "ollama")):
+        for raw in (os.environ.get(env_name) or "").split(","):
+            port = to_num(raw.strip())
+            if port and port not in seen:
+                seen[port] = (None, engine, False)
+
+    # Ollama is usually a systemd service with no container to inspect, so try
+    # the default port. Implicit probes are dropped unless something answers —
+    # a node without Ollama must not sprout a phantom "down" row.
+    if DEFAULT_OLLAMA_PORT not in seen:
+        seen[DEFAULT_OLLAMA_PORT] = (None, "ollama", True)
+
+    return [(port, c, engine, imp) for port, (c, engine, imp) in sorted(seen.items())]
 
 
-def probe_vllm(port: int, container: dict | None) -> dict:
-    base = f"http://127.0.0.1:{port}"
-    entry = {
+def blank_entry(port: int, container: dict | None, engine: str) -> dict:
+    return {
         "port": port,
+        "engine": engine,
         "container": container["name"] if container else None,
         "container_id": container["id"] if container else None,
         "image": container["image"] if container else None,
@@ -447,6 +508,11 @@ def probe_vllm(port: int, container: dict | None) -> dict:
         "models": [],
         "error": None,
     }
+
+
+def probe_vllm(port: int, container: dict | None) -> dict:
+    base = f"http://127.0.0.1:{port}"
+    entry = blank_entry(port, container, "vllm")
     try:
         payload = http_json(f"{base}/v1/models")
         entry["reachable"] = True
@@ -481,12 +547,111 @@ def probe_vllm(port: int, container: dict | None) -> dict:
     return entry
 
 
-def collect_vllm(containers: list[dict]) -> list[dict]:
-    cands = candidate_ports(containers)
+def mib(value) -> float | None:
+    """Bytes -> MiB, or None for a missing/zero value."""
+    num = to_num(value)
+    if not num:
+        return None
+    return round(num / 1048576.0, 1)
+
+
+def probe_ollama(port: int, container: dict | None) -> dict:
+    """Ollama has no metrics endpoint; what it does have is an honest view of
+    which models are resident in VRAM and which are pulled and ready."""
+    base = f"http://127.0.0.1:{port}"
+    entry = blank_entry(port, container, "ollama")
+    entry["metrics"] = None
+    entry["metrics_error"] = "Ollama exposes no Prometheus metrics"
+    entry["loaded"] = []
+    entry["available"] = []
+
+    try:
+        version = http_json(f"{base}/api/version")
+        entry["reachable"] = True
+        entry["engine_version"] = (version or {}).get("version")
+    except urllib.error.HTTPError as exc:
+        entry["error"] = f"HTTP {exc.code} on /api/version"
+        return entry
+    except Exception as exc:
+        entry["error"] = str(exc)[:200]
+        return entry
+
+    try:  # models currently resident in memory
+        for m in (http_json(f"{base}/api/ps") or {}).get("models", []) or []:
+            details = m.get("details") or {}
+            entry["loaded"].append(
+                {
+                    "id": m.get("name") or m.get("model"),
+                    "vram_mib": mib(m.get("size_vram")),
+                    "size_mib": mib(m.get("size")),
+                    "expires_in_s": iso_until(m.get("expires_at")),
+                    "parameter_size": details.get("parameter_size"),
+                    "quantization": details.get("quantization_level"),
+                    "family": details.get("family"),
+                }
+            )
+    except Exception as exc:
+        entry["ps_error"] = str(exc)[:200]
+
+    try:  # everything pulled onto this box, ready to load on first request
+        for m in (http_json(f"{base}/api/tags") or {}).get("models", []) or []:
+            details = m.get("details") or {}
+            entry["available"].append(
+                {
+                    "id": m.get("name") or m.get("model"),
+                    "size_mib": mib(m.get("size")),
+                    "parameter_size": details.get("parameter_size"),
+                    "quantization": details.get("quantization_level"),
+                    "modified_at": m.get("modified_at"),
+                }
+            )
+    except Exception as exc:
+        entry["tags_error"] = str(exc)[:200]
+
+    entry["models"] = [{"id": m["id"], "from": "ollama-ps"} for m in entry["loaded"] if m.get("id")]
+    entry["loaded_count"] = len(entry["loaded"])
+    entry["available_count"] = len(entry["available"])
+    entry["vram_mib"] = round(sum(m.get("vram_mib") or 0 for m in entry["loaded"]), 1) or None
+    expiries = [m["expires_in_s"] for m in entry["loaded"] if m.get("expires_in_s")]
+    entry["next_unload_s"] = min(expiries) if expiries else None
+    return entry
+
+
+def collect_servers(containers: list[dict]) -> list[dict]:
+    cands = candidate_servers(containers)
     if not cands:
         return []
+
+    def probe(item):
+        port, container, engine, implicit = item
+        entry = probe_ollama(port, container) if engine == "ollama" else probe_vllm(port, container)
+        entry["implicit"] = implicit
+        return entry
+
     with ThreadPoolExecutor(max_workers=min(8, len(cands))) as pool:
-        return list(pool.map(lambda item: probe_vllm(item[0], item[1]), cands))
+        results = list(pool.map(probe, cands))
+    # an unprompted guess that found nothing is not news
+    return [e for e in results if e["reachable"] or not e.get("implicit")]
+
+
+def collect_webuis(containers: list[dict]) -> list[dict]:
+    """Open WebUI and friends: not model servers, but worth linking to."""
+    uis = []
+    for c in containers:
+        if c.get("engine") != "webui" or c["state"] != "running":
+            continue
+        for p in c["ports"]:
+            uis.append(
+                {
+                    "name": c["name"],
+                    "image": c["image"],
+                    "port": p.get("host_port"),
+                    "uptime_s": c["uptime_s"],
+                    "restarts": c["restarts"],
+                }
+            )
+            break
+    return uis
 
 
 # --------------------------------------------------------------------------
@@ -585,7 +750,8 @@ def build_snapshot() -> dict:
     t0 = time.time()
     gpu_info = collect_gpus()
     containers, docker_error = collect_containers()
-    vllm = collect_vllm(containers)
+    servers = collect_servers(containers)
+    web_uis = collect_webuis(containers)
     return {
         "agent_version": AGENT_VERSION,
         "collected_at": time.time(),
@@ -604,7 +770,9 @@ def build_snapshot() -> dict:
         "gpu_error": gpu_info["gpu_error"],
         "docker_error": docker_error,
         "containers": containers,
-        "vllm": vllm,
+        "servers": servers,
+        "vllm": servers,   # kept so an older dashboard still reads this agent
+        "web_uis": web_uis,
     }
 
 

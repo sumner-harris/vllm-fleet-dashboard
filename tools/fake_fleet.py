@@ -12,6 +12,60 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 T0 = time.time()
 COUNTERS = {}
 
+OLLAMA_TAGS = [
+    ("llama3.3:70b", 42520, "70.6B", "Q4_K_M"),
+    ("qwen2.5-coder:32b", 19850, "32.8B", "Q4_K_M"),
+    ("gemma3:27b", 17400, "27.4B", "Q4_K_M"),
+    ("mistral-small:24b", 14300, "23.6B", "Q4_K_M"),
+    ("nomic-embed-text:latest", 274, "137M", "F16"),
+]
+
+
+def ollama_entry(port, loaded_names, webui=None):
+    """An Ollama server as the agent reports it: resident models + catalog."""
+    by_name = {t[0]: t for t in OLLAMA_TAGS}
+    loaded = []
+    for i, name in enumerate(loaded_names):
+        _, size_mib, params, quant = by_name[name]
+        loaded.append(
+            {
+                "id": name,
+                "vram_mib": round(size_mib * 0.96, 1),
+                "size_mib": float(size_mib),
+                "expires_in_s": 60 * (4 + 7 * i) - int(time.time() - T0) % 200,
+                "parameter_size": params,
+                "quantization": quant,
+                "family": name.split(":")[0],
+            }
+        )
+    return {
+        "port": port,
+        "engine": "ollama",
+        "engine_version": "0.12.4",
+        "container": "ollama" if webui else None,
+        "container_id": "0ll4m4c0nt",
+        "image": "ollama/ollama:latest" if webui else None,
+        "uptime_s": int(time.time() - T0) + 86400,
+        "restarts": 0,
+        "health": None,
+        "reachable": True,
+        "error": None,
+        "metrics": None,
+        "metrics_error": "Ollama exposes no Prometheus metrics",
+        "models": [{"id": m["id"], "from": "ollama-ps"} for m in loaded],
+        "loaded": loaded,
+        "available": [
+            {"id": n, "size_mib": float(sz), "parameter_size": pp, "quantization": q,
+             "modified_at": "2026-08-02T10:00:00Z"}
+            for n, sz, pp, q in OLLAMA_TAGS
+        ],
+        "loaded_count": len(loaded),
+        "available_count": len(OLLAMA_TAGS),
+        "vram_mib": round(sum(m["vram_mib"] for m in loaded), 1) or None,
+        "next_unload_s": min([m["expires_in_s"] for m in loaded], default=None),
+        "implicit": False,
+    }
+
 
 def advance(key, rate):
     """Integrate a varying rate into a monotonically increasing counter."""
@@ -31,10 +85,12 @@ FLEET = [
          servers=[(8000, "deepseek-ai/DeepSeek-R1-Distill-Llama-70B", "vllm-r1", 0)]),
     dict(port=19904, host="zgx-01", gpu="NVIDIA GB10", mem=131072, unified=True,
          servers=[(8000, "google/gemma-3-27b-it", "vllm-gemma", 0),
-                  (8100, "BAAI/bge-m3", "vllm-embed", 6)]),
+                  (8100, "BAAI/bge-m3", "vllm-embed", 6)],
+         ollama=(11434, ["llama3.3:70b", "qwen2.5-coder:32b"]), webui=3000),
     dict(port=19905, host="zgx-02", gpu="NVIDIA GB10", mem=131072, unified=True,
          servers=[(8000, "Qwen/Qwen3-32B", "vllm-qwen3", 0),
-                  (8001, "openai/gpt-oss-20b", "vllm-gptoss", 2)]),
+                  (8001, "openai/gpt-oss-20b", "vllm-gptoss", 2)],
+         ollama=(11434, []), webui=3000),   # idle Ollama: nothing resident
 ]
 
 
@@ -57,7 +113,7 @@ def snapshot(node):
             is_vllm=True, model_arg=model, served_model_name=model,
             tensor_parallel_size=1, gpu_memory_utilization=0.9, max_model_len=32768))
         if down:
-            vllm.append(dict(port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
+            vllm.append(dict(engine="vllm", port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
                              image="vllm/vllm-openai:v0.10.1", uptime_s=None, restarts=4,
                              health=None, reachable=False, models=[],
                              error="Connection refused", metrics=None,
@@ -67,7 +123,7 @@ def snapshot(node):
             continue
         rate = 0.0 if mode == 6 else 120 + 90 * abs(math.sin(t / 31 + i + seed))
         vllm.append(dict(
-            port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
+            engine="vllm", port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
             image="vllm/vllm-openai:v0.10.1", uptime_s=int(t + 3600 * (6 + i)),
             restarts=1 if mode == 2 else 0, health="healthy", reachable=True,
             models=[{"id": model, "max_model_len": 32768, "owned_by": "vllm"}],
@@ -84,8 +140,15 @@ def snapshot(node):
                 "vllm:time_to_first_token_seconds_sum": 0.28 * (t / 4 + 100),
                 "vllm:time_to_first_token_seconds_count": (t / 4 + 100),
             }))
+    if node.get("ollama"):
+        oport, oloaded = node["ollama"]
+        vllm.append(ollama_entry(oport, oloaded, webui=node.get("webui")))
+    web_uis = ([{"name": "open-webui", "image": "ghcr.io/open-webui/open-webui:main",
+                 "port": node["webui"], "uptime_s": int(t) + 86400, "restarts": 0}]
+               if node.get("webui") else [])
+
     return dict(
-        agent_version="1.1.0", collected_at=time.time(), collect_ms=42,
+        agent_version="1.3.0", collected_at=time.time(), collect_ms=42,
         hostname=node["host"], board_model="NVIDIA DGX Spark", kernel="6.11.0-nv",
         arch="aarch64", uptime_s=int(t + 86400 * 3.4), load_avg=[2.1, 1.8, 1.6],
         cpu_count=20, disk_root={"total_gib": 3720.0, "used_gib": 812.4, "used_pct": 21.8},
@@ -100,7 +163,8 @@ def snapshot(node):
                    temp_c=round(48 + util * 0.28, 1), power_w=round(60 + util * 1.5, 1),
                    power_limit_w=240, clock_sm_mhz=1400,
                    source="nvidia-smi", unified_memory=True, memory_source="host-unified")],
-        gpu_error=None, docker_error=None, containers=containers, vllm=vllm)
+        gpu_error=None, docker_error=None, containers=containers,
+        servers=vllm, vllm=vllm, web_uis=web_uis)
 
 
 def make_handler(node):

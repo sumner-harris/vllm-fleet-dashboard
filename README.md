@@ -24,13 +24,43 @@ bound to `127.0.0.1` and containers on `--network host`, which a remote scan can
 
 ## What you get
 
-| Per machine | Per vLLM server |
+| Per machine | Per model server |
 |---|---|
 | Online / degraded / offline, with the reason | Port and model ID (from `/v1/models`) |
 | GPU name, memory used / total, compute % | Serving / down, container name, uptime, restart count |
 | Temperature, power draw | Requests running and queued, KV-cache % |
-| 2 hours of GPU-utilization history | Generation tok/s, end-to-end latency, TTFT |
+| 2 hours of GPU-utilization history | Generation tok/s, end-to-end latency, TTFT (vLLM) |
+| Open WebUI links | Resident + available models, VRAM, unload countdown (Ollama) |
 | Board model, host uptime | Copy buttons: base URL, model ID, ready-to-run `curl` |
+
+### Ollama and Open WebUI
+
+The agent also finds **Ollama** on each node — whether it runs as a systemd service
+or in Docker — by probing `127.0.0.1:11434`. Ollama stays bound to loopback exactly
+as intended; nothing needs to be exposed to the network, because the agent is already
+on the machine.
+
+For each Ollama server you get:
+
+- **Resident models** (`/api/ps`) — what is loaded in VRAM right now, each with its
+  own VRAM cost, parameter size, quantization, and a countdown to its `keep_alive`
+  unload. Per-model memory attribution that vLLM can't give you, since vLLM
+  preallocates one pool.
+- **Available models** (`/api/tags`) — everything pulled onto that box and ready to
+  serve, with sizes; expandable, with a copy button per model ID.
+- **No throughput, latency, queue depth or KV cache.** Ollama exposes no Prometheus
+  endpoint, so those read `–` rather than a made-up zero. The fleet throughput tile
+  says "vLLM only" when an Ollama server is present.
+
+An idle Ollama has unloaded everything and reads **ready** in green — that is healthy,
+not down. It only goes red when `/api/version` stops answering.
+
+**Open WebUI** containers are detected too, and appear as a link on the node card
+(`open-webui → :3000`). They carry `OLLAMA_BASE_URL`, so they are classified before
+Ollama and never probed as a model server.
+
+If Ollama listens somewhere other than 11434, set `FLEET_OLLAMA_PORTS=11434,11435`
+in that node's unit file.
 
 DGX Spark's GB10 shares one memory pool between CPU and GPU. The agent detects that
 and reports the unified pool, labeled "unified memory" on the card, so the number
@@ -236,6 +266,9 @@ curl -s localhost:8080/api/fleet?history=false \
 | Node *degraded*, "vLLM not answering on port N" | The container is up but the server isn't accepting requests — still loading weights, or it crashed. Check `docker logs`. |
 | "no vLLM server found on this node" | The agent looks for containers whose image or command mentions vLLM. If yours is named something else, set `FLEET_VLLM_PORTS=8000,8001` in the unit file. |
 | `template parsing error: function "dict" not defined` | Agent older than 1.2.0. Upgrade it: re-run `sudo bash agent/install-agent.sh 9900` on that node. |
+| Ollama not showing up | Agent older than 1.3.0, or Ollama isn't on 11434 — set `FLEET_OLLAMA_PORTS` in the unit file. |
+| Ollama shows "nothing resident" | Normal: `keep_alive` expired and the models unloaded. The next request reloads one. |
+| Ollama row has no tok/s | Expected — Ollama publishes no metrics endpoint. |
 | GPU stats missing, everything else fine | `nvidia-smi` isn't on PATH for the agent's user, or the agent isn't running as root. |
 | tok/s shows `–` | Needs two consecutive polls to derive a rate; it fills in after ~20s. |
 | Refresh button missing | That browser has no admin token — open the `?admin=<token>` link once. |

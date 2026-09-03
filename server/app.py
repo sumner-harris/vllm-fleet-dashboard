@@ -246,9 +246,19 @@ def derive_endpoint(node: dict, entry: dict, now: float) -> dict:
         cache = metrics.get("vllm:kv_cache_usage_perc")
 
     models = [m.get("id") for m in (entry.get("models") or []) if m.get("id")]
+    engine = entry.get("engine") or "vllm"
     base_url = f"http://{node['public_host']}:{entry['port']}/v1"
     return {
         "port": entry["port"],
+        "engine": engine,
+        "engine_version": entry.get("engine_version"),
+        # Ollama only: what is resident in VRAM vs pulled and ready on disk
+        "loaded": entry.get("loaded") or [],
+        "available": entry.get("available") or [],
+        "loaded_count": entry.get("loaded_count"),
+        "available_count": entry.get("available_count"),
+        "vram_mib": entry.get("vram_mib"),
+        "next_unload_s": entry.get("next_unload_s"),
         "reachable": bool(entry.get("reachable")),
         "error": entry.get("error"),
         "models": models,
@@ -295,7 +305,21 @@ def derive_node(node: dict, snapshot: dict | None, error: str | None, now: float
             "last_seen": STATE["nodes"].get(node["name"], {}).get("last_seen"),
         }
 
-    endpoints = [derive_endpoint(node, e, now) for e in (snapshot.get("vllm") or [])]
+    endpoints = [
+        derive_endpoint(node, e, now)
+        for e in (snapshot.get("servers") or snapshot.get("vllm") or [])
+    ]
+    web_uis = [
+        {
+            "name": w.get("name"),
+            "port": w.get("port"),
+            "url": f"http://{node['public_host']}:{w.get('port')}",
+            "uptime_s": w.get("uptime_s"),
+            "restarts": w.get("restarts"),
+        }
+        for w in (snapshot.get("web_uis") or [])
+        if w.get("port")
+    ]
     gpus = snapshot.get("gpus") or []
 
     mem_total = sum(g.get("memory_total_mib") or 0 for g in gpus)
@@ -351,7 +375,11 @@ def derive_node(node: dict, snapshot: dict | None, error: str | None, now: float
         "gpu_util_pct": round(sum(utils) / len(utils), 1) if utils else None,
         "containers": snapshot.get("containers") or [],
         "endpoints": endpoints,
-        "gen_tps": round(sum(e["gen_tps"] or 0 for e in endpoints), 1) if endpoints else 0.0,
+        "web_uis": web_uis,
+        "gen_tps": round(
+            sum(e["gen_tps"] or 0 for e in endpoints if e["engine"] == "vllm"), 1
+        ) if endpoints else 0.0,
+        "engines": sorted({e["engine"] for e in endpoints}),
         "requests_running": sum(e["requests_running"] or 0 for e in endpoints),
         "requests_waiting": sum(e["requests_waiting"] or 0 for e in endpoints),
         "collected_at": snapshot.get("collected_at"),
@@ -418,6 +446,10 @@ def fleet_summary() -> dict:
     endpoints = [e for n in online for e in n["endpoints"]]
     live_endpoints = [e for e in endpoints if e["reachable"]]
     models = sorted({m for e in live_endpoints for m in e["models"]})
+    available = sorted({
+        m.get("id") for e in live_endpoints for m in (e.get("available") or []) if m.get("id")
+    })
+    ollama_eps = [e for e in live_endpoints if e["engine"] == "ollama"]
     mem_total = sum(g.get("memory_total_mib") or 0 for g in gpus)
     mem_used = sum(g.get("memory_used_mib") or 0 for g in gpus)
     utils = [g.get("util_gpu_pct") for g in gpus if g.get("util_gpu_pct") is not None]
@@ -431,6 +463,11 @@ def fleet_summary() -> dict:
         "endpoints_live": len(live_endpoints),
         "models_loaded": len(models),
         "model_list": models,
+        "models_available": len(available),
+        "available_list": available,
+        "ollama_endpoints": len(ollama_eps),
+        "ollama_vram_mib": round(sum(e.get("vram_mib") or 0 for e in ollama_eps), 1) or None,
+        "web_uis": [w for n in online for w in (n.get("web_uis") or [])],
         "gpu_mem_total_mib": mem_total or None,
         "gpu_mem_used_mib": mem_used or None,
         "gpu_mem_used_pct": round(mem_used / mem_total * 100, 1) if mem_total else None,

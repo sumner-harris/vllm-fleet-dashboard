@@ -277,10 +277,14 @@ function renderSummary(data) {
   );
 
   tile("Models loaded", fmtInt(f.models_loaded), null,
-    `${f.endpoints_live} live endpoint${f.endpoints_live === 1 ? "" : "s"}`);
+    f.models_available
+      ? `${f.endpoints_live} live endpoint${f.endpoints_live === 1 ? "" : "s"} · ${f.models_available} pulled and ready`
+      : `${f.endpoints_live} live endpoint${f.endpoints_live === 1 ? "" : "s"}`);
 
-  tile("Generation throughput", fmtCompact(f.gen_tps), "tok/s", null,
+  const tpsTile = tile("Generation throughput", fmtCompact(f.gen_tps), "tok/s",
+    f.ollama_endpoints ? "vLLM only — Ollama reports no metrics" : null,
     sparkline(tpsPts, { title: "last 2h", unit: " tok/s", fmt: fmt1, floor: 10 }));
+  void tpsTile;
 
   tile("Requests running", fmtInt(f.requests_running), null,
     `${fmtInt(f.requests_waiting)} queued`);
@@ -293,38 +297,95 @@ function metric(label, value, cls) {
   return d;
 }
 
-/** One vLLM server on this node: identity, health, live load, copy-ready URL. */
-function endpointRow(e) {
+const ENGINE_LABEL = { vllm: "vLLM", ollama: "Ollama" };
+
+/** One model server on this node: identity, health, live load, copy-ready URL. */
+function endpointRow(e, nodeName) {
+  const isOllama = e.engine === "ollama";
   const row = el("div", "ep" + (e.reachable ? "" : " down"));
 
   const r1 = el("div", "r1");
   r1.appendChild(el("span", "portbadge", ":" + e.port));
-  const mid = el("span", "mid", e.models.length ? e.models.join(", ") : "no model reported");
+  r1.appendChild(el("span", "enginebadge " + (e.engine || "vllm"), ENGINE_LABEL[e.engine] || "vLLM"));
+  const label = e.models.length
+    ? e.models.join(", ")
+    : isOllama ? "nothing resident" : "no model reported";
+  const mid = el("span", "mid", label);
   if (!e.models.length) mid.classList.add("dim");
   r1.appendChild(mid);
   r1.appendChild(el("span", "spacer"));
-  if (e.reachable) {
+  if (!e.reachable) {
+    r1.appendChild(statusChip("crit", "down"));
+  } else if (isOllama) {
+    // An idle Ollama has unloaded everything and is perfectly healthy.
+    r1.appendChild(e.models.length ? statusChip("good", "serving") : statusChip("good", "ready"));
+  } else {
     const many = (e.restarts || 0) > 3;
     r1.appendChild(statusChip(many ? "warn" : "good", many ? `${e.restarts} restarts` : "serving"));
-  } else {
-    r1.appendChild(statusChip("crit", "down"));
   }
   row.appendChild(r1);
 
   const bits = [];
+  if (isOllama && e.engine_version) bits.push("ollama " + e.engine_version);
   if (e.container) bits.push(e.container);
   if (e.uptime_s) bits.push("up " + fmtDur(e.uptime_s));
-  if (e.restarts !== null && e.restarts !== undefined) bits.push(`${e.restarts} restart${e.restarts === 1 ? "" : "s"}`);
-  if (e.max_model_len) bits.push("ctx " + fmtCompact(e.max_model_len));
-  if (e.tensor_parallel_size && e.tensor_parallel_size > 1) bits.push("TP " + e.tensor_parallel_size);
+  if (!isOllama && e.restarts !== null && e.restarts !== undefined)
+    bits.push(`${e.restarts} restart${e.restarts === 1 ? "" : "s"}`);
+  if (!isOllama && e.max_model_len) bits.push("ctx " + fmtCompact(e.max_model_len));
+  if (!isOllama && e.tensor_parallel_size > 1) bits.push("TP " + e.tensor_parallel_size);
   if (!e.reachable && e.error) bits.push(e.error.slice(0, 70));
   if (bits.length) row.appendChild(el("div", "r2", bits.join(" · ")));
 
-  if (e.reachable) {
+  if (isOllama && e.reachable) {
+    // Per-model residency: what each one costs and when it evaporates.
+    (e.loaded || []).forEach((m) => {
+      const line = el("div", "mline");
+      if ((e.loaded || []).length > 1) line.appendChild(el("span", "mname", m.id));
+      const facts = [];
+      if (m.vram_mib) facts.push(gib(m.vram_mib) + " VRAM");
+      if (m.parameter_size) facts.push(m.parameter_size);
+      if (m.quantization) facts.push(m.quantization);
+      if (m.expires_in_s) facts.push("unloads in " + fmtDur(m.expires_in_s));
+      line.appendChild(el("span", "mfacts", facts.join(" · ")));
+      row.appendChild(line);
+    });
+
+    const r3 = el("div", "r3");
+    r3.appendChild(metric("resident", fmtInt(e.loaded_count ?? 0)));
+    r3.appendChild(metric("available", fmtInt(e.available_count ?? 0)));
+    r3.appendChild(metric("VRAM", e.vram_mib ? gib(e.vram_mib) : "–"));
+    r3.appendChild(metric("next unload", e.next_unload_s ? fmtDur(e.next_unload_s) : "–"));
+    row.appendChild(r3);
+
+    if ((e.available || []).length) {
+      const det = el("details", "avail");
+      // Cards are rebuilt on every poll, so remember which lists the viewer
+      // opened — otherwise the list snaps shut under them every few seconds.
+      const key = `${nodeName}:${e.port}`;
+      det.open = openRows.has(key);
+      det.addEventListener("toggle", () => {
+        if (det.open) openRows.add(key);
+        else openRows.delete(key);
+      });
+      const sum = el("summary", null, `${e.available.length} models pulled and ready`);
+      det.appendChild(sum);
+      const list = el("div", "availlist");
+      e.available.forEach((m) => {
+        const item = el("div", "availrow");
+        item.appendChild(el("span", "an", m.id));
+        item.appendChild(el("span", "as", [m.parameter_size, m.quantization,
+          m.size_mib ? gib(m.size_mib) : null].filter(Boolean).join(" · ")));
+        item.appendChild(copyBtn("copy", m.id, m.id));
+        list.appendChild(item);
+      });
+      det.appendChild(list);
+      row.appendChild(det);
+    }
+  } else if (e.reachable) {
     const r3 = el("div", "r3");
     r3.appendChild(metric("tok/s", e.gen_tps === null || e.gen_tps === undefined ? "–" : fmt1(e.gen_tps)));
     r3.appendChild(metric("running", fmtInt(e.requests_running ?? 0)));
-    r3.appendChild(metric("queued", fmtInt(e.requests_waiting ?? 0), (e.requests_waiting || 0) > 0 ? "hot" : ""));
+    r3.appendChild(metric("queued", fmtInt(e.requests_waiting ?? 0)));
     r3.appendChild(metric("KV cache", e.kv_cache_pct === null || e.kv_cache_pct === undefined ? "–" : fmt1(e.kv_cache_pct) + "%"));
     r3.appendChild(metric("e2e", e.avg_latency_s ? fmt1(e.avg_latency_s) + "s" : "–"));
     r3.appendChild(metric("TTFT", e.ttft_s ? fmt1(e.ttft_s * 1000) + "ms" : "–"));
@@ -350,7 +411,7 @@ function endpointList(node) {
         : "No vLLM server detected on this node."));
     return wrap;
   }
-  node.endpoints.forEach((e) => wrap.appendChild(endpointRow(e)));
+  node.endpoints.forEach((e) => wrap.appendChild(endpointRow(e, node.name)));
   return wrap;
 }
 
@@ -415,6 +476,17 @@ function nodeCard(node, history) {
     right: node.status === "offline" ? "" : (node.gen_tps ? `${fmt1(node.gen_tps)} tok/s now` : "idle"),
   }));
 
+  if ((node.web_uis || []).length) {
+    const w = el("div", "webuis");
+    node.web_uis.forEach((u) => {
+      const a = el("a", "webui");
+      a.href = u.url; a.target = "_blank"; a.rel = "noopener";
+      a.textContent = `${u.name || "web UI"} → :${u.port}`;
+      w.appendChild(a);
+    });
+    body.appendChild(w);
+  }
+
   c.appendChild(body);
   c.appendChild(endpointList(node));
   return c;
@@ -436,10 +508,15 @@ function renderTable(data) {
       tr.appendChild(el("td", null, i === 0 ? n.name : ""));
       tr.appendChild(el("td", "mono", i === 0 ? n.public_host : ""));
       tr.appendChild(el("td", "num port", e ? String(e.port) : "–"));
-      tr.appendChild(el("td", "model", e && e.models.length ? e.models.join(", ") : "—"));
+      const mtd = el("td", "model", e && e.models.length ? e.models.join(", ") : "—");
+      if (e && e.engine === "ollama" && e.available_count)
+        mtd.appendChild(el("div", "dim", `+${e.available_count} available`));
+      tr.appendChild(mtd);
       const st = el("td");
       if (!e) st.appendChild(statusChip(nodeStatusKind(n), n.status));
-      else st.appendChild(e.reachable ? statusChip("good", "serving") : statusChip("crit", "down"));
+      else if (!e.reachable) st.appendChild(statusChip("crit", "down"));
+      else st.appendChild(statusChip("good", e.models.length ? "serving" : "ready"));
+      if (e) st.appendChild(el("div", "dim", ENGINE_LABEL[e.engine] || "vLLM"));
       tr.appendChild(st);
       tr.appendChild(el("td", "mono", (e && e.container) || "—"));
       tr.appendChild(el("td", "num", e && e.restarts !== null && e.restarts !== undefined ? String(e.restarts) : "–"));

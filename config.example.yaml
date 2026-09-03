@@ -11,6 +11,10 @@ agent_port: 9900         # default agent port (override per node below)
 # Optional: survives a dashboard restart. Comment out to keep history in RAM only.
 history_file: "./fleet-history.json"
 
+# vLLM and Ollama are both discovered by the agent on each node — nothing to
+# list here. Set FLEET_OLLAMA_PORTS / FLEET_VLLM_PORTS in a node's unit file
+# only if a server listens somewhere unusual.
+
 # Optional shared secret. If set here (or per node), it must match
 # FLEET_AGENT_TOKEN on the agents.
 # agent_token: "change-me"

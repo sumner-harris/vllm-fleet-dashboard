@@ -12,6 +12,8 @@ RestartSec=5
 # Environment=FLEET_AGENT_TOKEN=change-me
 # Extra ports to probe when vLLM runs outside Docker:
 # Environment=FLEET_VLLM_PORTS=8000,8001
+# Ollama on a non-default port (11434 is probed automatically):
+# Environment=FLEET_OLLAMA_PORTS=11434
 User=root
 StandardOutput=journal
 StandardError=journal
