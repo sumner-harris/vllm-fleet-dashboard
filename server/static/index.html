@@ -185,7 +185,21 @@ a.webui:hover{color:var(--ink);border-color:var(--axis)}
 .met .mk{font-size:10.5px;color:var(--muted);letter-spacing:.02em}
 .met .mv{font-size:13px;font-weight:560;font-variant-numeric:tabular-nums;color:var(--ink)}
 .met.hot .mv{color:var(--ink)}
-.ep .r4{display:flex;align-items:center;gap:6px;margin-top:9px}
+.ep .r4{display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap}
+.accessbadge{
+  font-size:10px;font-weight:620;letter-spacing:.03em;text-transform:uppercase;flex:none;
+  padding:2px 6px;border-radius:5px;border:1px solid var(--border)
+}
+.accessbadge.net{color:var(--good-ink);border-color:var(--good)}
+.accessbadge.local{color:var(--ink-2);background:var(--surface-2)}
+.accessnote{display:flex;gap:7px;align-items:baseline;margin-top:6px;font-size:11px;color:var(--muted)}
+.accessnote svg{width:12px;height:12px;flex:none;fill:var(--warn);margin-top:2px}
+.accessnote.warn{color:var(--ink-2)}
+code.tunnelcmd{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--ink-2);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:5px;padding:2px 6px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+}
 .ep .url{
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--muted);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap

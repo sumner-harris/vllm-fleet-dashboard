@@ -37,6 +37,7 @@ DEFAULTS = {
     "title": "vLLM Fleet",
     "history_file": "",             # optional path; survives restarts when set
     "admin_token": "",              # when set, control endpoints require it
+    "verify_lan": True,             # probe advertised URLs from the dashboard host
 }
 
 
@@ -247,11 +248,31 @@ def derive_endpoint(node: dict, entry: dict, now: float) -> dict:
 
     models = [m.get("id") for m in (entry.get("models") or []) if m.get("id")]
     engine = entry.get("engine") or "vllm"
-    base_url = f"http://{node['public_host']}:{entry['port']}/v1"
+    port = entry["port"]
+
+    # How you actually reach this server depends on what it is bound to, not on
+    # which engine it is. A loopback-only server (Ollama under an IT policy that
+    # forbids 0.0.0.0, for instance) is reached through a tunnel, so that — not a
+    # LAN URL that would never work — is what the dashboard hands you.
+    scope = entry.get("bind_scope") or "unknown"
+    on_network = scope in ("all", "specific")
+    host = node["public_host"]
+    lan_url = f"http://{host}:{port}/v1" if on_network else None
+    local_url = f"http://localhost:{port}/v1"
+    base_url = lan_url or local_url
+    tunnel_cmd = f"ssh -N -L {port}:localhost:{port} {host}"
     return {
         "port": entry["port"],
         "engine": engine,
         "engine_version": entry.get("engine_version"),
+        "bind_scope": scope,
+        "listen_addrs": entry.get("listen_addrs") or [],
+        "on_network": on_network,
+        "lan_url": lan_url,
+        "local_url": local_url,
+        "tunnel_cmd": tunnel_cmd,
+        "sync_hint": f"NVIDIA Sync → Custom App → localhost:{port}",
+        "lan_verified": None,
         # Ollama only: what is resident in VRAM vs pulled and ready on disk
         "loaded": entry.get("loaded") or [],
         "available": entry.get("available") or [],
@@ -387,6 +408,31 @@ def derive_node(node: dict, snapshot: dict | None, error: str | None, now: float
     }
 
 
+async def verify_lan(client: httpx.AsyncClient, nodes: list[dict]) -> None:
+    """Bind scope says what the process intends; this says what actually works
+    from where the dashboard sits, so a firewall shows up too."""
+
+    async def probe(host: str, e: dict) -> None:
+        path = "/api/version" if e["engine"] == "ollama" else "/v1/models"
+        try:
+            r = await client.get(f"http://{host}:{e['port']}{path}", timeout=2.5)
+            e["lan_verified"] = r.status_code < 500
+        except Exception:
+            e["lan_verified"] = False
+
+    tasks = []
+    for n in nodes:
+        for e in n["endpoints"]:
+            if not e["reachable"]:
+                continue
+            if not e["on_network"]:
+                e["lan_verified"] = False   # loopback: known, no probe needed
+                continue
+            tasks.append(probe(n["public_host"], e))
+    if tasks:
+        await asyncio.gather(*tasks)
+
+
 async def poll_once() -> None:
     now = time.time()
     t0 = time.perf_counter()
@@ -409,9 +455,15 @@ async def poll_once() -> None:
 
         results = await asyncio.gather(*(one(n) for n in CONFIG["nodes"]))
 
+        derived_nodes = [derive_node(node, snap, err, now) for node, snap, err in results]
+        if CONFIG["verify_lan"]:
+            try:
+                await verify_lan(client, derived_nodes)
+            except Exception as exc:
+                print(f"[poll] lan verification skipped: {exc}")
+
     fleet_tps = 0.0
-    for node, snapshot, error in results:
-        derived = derive_node(node, snapshot, error, now)
+    for node, derived in zip(CONFIG["nodes"], derived_nodes):
         STATE["nodes"][node["name"]] = derived
         fleet_tps += derived.get("gen_tps") or 0.0
         STATE["history"][node["name"]].append(
@@ -461,6 +513,11 @@ def fleet_summary() -> dict:
         "gpus": len(gpus),
         "endpoints_total": len(endpoints),
         "endpoints_live": len(live_endpoints),
+        "endpoints_networked": len([e for e in live_endpoints if e["on_network"]]),
+        "endpoints_local_only": len([e for e in live_endpoints if not e["on_network"]]),
+        "endpoints_unverified": len(
+            [e for e in live_endpoints if e["on_network"] and e["lan_verified"] is False]
+        ),
         "models_loaded": len(models),
         "model_list": models,
         "models_available": len(available),

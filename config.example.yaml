@@ -11,6 +11,10 @@ agent_port: 9900         # default agent port (override per node below)
 # Optional: survives a dashboard restart. Comment out to keep history in RAM only.
 history_file: "./fleet-history.json"
 
+# Check each advertised LAN URL from the dashboard host, so a firewall between
+# here and a node shows up as well as the server's own bind address.
+verify_lan: true
+
 # vLLM and Ollama are both discovered by the agent on each node — nothing to
 # list here. Set FLEET_OLLAMA_PORTS / FLEET_VLLM_PORTS in a node's unit file
 # only if a server listens somewhere unusual.

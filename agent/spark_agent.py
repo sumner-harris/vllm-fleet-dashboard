@@ -37,7 +37,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "1.3.0"
+AGENT_VERSION = "1.4.0"
 CACHE_TTL = 2.0  # seconds; collapses dashboard polls into one collection
 
 # --------------------------------------------------------------------------
@@ -491,6 +491,72 @@ def candidate_servers(containers: list[dict]) -> list[tuple[int, dict | None, st
     return [(port, c, engine, imp) for port, (c, engine, imp) in sorted(seen.items())]
 
 
+def _hex_ip(raw: str) -> str:
+    """/proc/net/tcp local_address hex -> dotted or colon notation."""
+    if len(raw) == 8:  # IPv4, little-endian
+        octets = [int(raw[i : i + 2], 16) for i in range(0, 8, 2)][::-1]
+        return ".".join(str(o) for o in octets)
+    if len(raw) == 32:  # IPv6, little-endian within each 4-byte group
+        groups = [raw[i : i + 8] for i in range(0, 32, 8)]
+        flat = b""
+        for g in groups:
+            flat += bytes.fromhex(g)[::-1]
+        if flat == b"\x00" * 16:
+            return "::"
+        if flat == b"\x00" * 15 + b"\x01":
+            return "::1"
+        if flat[:12] == b"\x00" * 10 + b"\xff\xff":  # IPv4-mapped
+            return ".".join(str(b) for b in flat[12:])
+        return ":".join(flat[i : i + 2].hex() for i in range(0, 16, 2))
+    return raw
+
+
+def listen_map() -> dict[int, list[str]]:
+    """port -> addresses it is LISTENing on, straight from the kernel.
+
+    This is how the agent knows whether a server is reachable from the network
+    or only from the machine itself — without changing anything about how the
+    server is run.
+    """
+    ports: dict[int, list[str]] = {}
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as fh:
+                next(fh, None)  # header
+                for line in fh:
+                    cols = line.split()
+                    if len(cols) < 4 or cols[3] != "0A":  # 0A = TCP_LISTEN
+                        continue
+                    local = cols[1]
+                    addr_hex, _, port_hex = local.rpartition(":")
+                    try:
+                        port = int(port_hex, 16)
+                    except ValueError:
+                        continue
+                    addr = _hex_ip(addr_hex)
+                    bucket = ports.setdefault(port, [])
+                    if addr not in bucket:
+                        bucket.append(addr)
+        except OSError:
+            continue
+    return ports
+
+
+LOOPBACK_PREFIXES = ("127.", "::1")
+
+
+def classify_bind(port: int, listens: dict[int, list[str]]) -> tuple[str, list[str]]:
+    """-> ("all" | "loopback" | "specific" | "unknown", addresses)"""
+    addrs = listens.get(port) or []
+    if not addrs:
+        return "unknown", []
+    if any(a in ("0.0.0.0", "::") for a in addrs):
+        return "all", addrs
+    if all(a.startswith(LOOPBACK_PREFIXES) for a in addrs):
+        return "loopback", addrs
+    return "specific", addrs
+
+
 def blank_entry(port: int, container: dict | None, engine: str) -> dict:
     return {
         "port": port,
@@ -622,10 +688,15 @@ def collect_servers(containers: list[dict]) -> list[dict]:
     if not cands:
         return []
 
+    listens = listen_map()
+
     def probe(item):
         port, container, engine, implicit = item
         entry = probe_ollama(port, container) if engine == "ollama" else probe_vllm(port, container)
         entry["implicit"] = implicit
+        scope, addrs = classify_bind(port, listens)
+        entry["bind_scope"] = scope
+        entry["listen_addrs"] = addrs
         return entry
 
     with ThreadPoolExecutor(max_workers=min(8, len(cands))) as pool:
@@ -636,6 +707,7 @@ def collect_servers(containers: list[dict]) -> list[dict]:
 
 def collect_webuis(containers: list[dict]) -> list[dict]:
     """Open WebUI and friends: not model servers, but worth linking to."""
+    listens = listen_map()
     uis = []
     for c in containers:
         if c.get("engine") != "webui" or c["state"] != "running":
@@ -648,6 +720,7 @@ def collect_webuis(containers: list[dict]) -> list[dict]:
                     "port": p.get("host_port"),
                     "uptime_s": c["uptime_s"],
                     "restarts": c["restarts"],
+                    "bind_scope": classify_bind(p.get("host_port"), listens)[0],
                 }
             )
             break

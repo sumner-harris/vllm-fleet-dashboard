@@ -276,10 +276,12 @@ function renderSummary(data) {
     memTile.lastChild
   );
 
+  const reachFoot = f.endpoints_local_only
+    ? `${f.endpoints_networked} on the network · ${f.endpoints_local_only} local only`
+    : `${f.endpoints_live} live endpoint${f.endpoints_live === 1 ? "" : "s"}`;
+  void reachFoot;
   tile("Models loaded", fmtInt(f.models_loaded), null,
-    f.models_available
-      ? `${f.endpoints_live} live endpoint${f.endpoints_live === 1 ? "" : "s"} · ${f.models_available} pulled and ready`
-      : `${f.endpoints_live} live endpoint${f.endpoints_live === 1 ? "" : "s"}`);
+    f.models_available ? `${reachFoot} · ${f.models_available} pulled and ready` : reachFoot);
 
   const tpsTile = tile("Generation throughput", fmtCompact(f.gen_tps), "tok/s",
     f.ollama_endpoints ? "vLLM only — Ollama reports no metrics" : null,
@@ -392,13 +394,39 @@ function endpointRow(e, nodeName) {
     row.appendChild(r3);
   }
 
+  // Access: what actually works from where the reader is sitting.
   const r4 = el("div", "r4");
-  r4.appendChild(el("code", "url", e.base_url));
-  r4.appendChild(el("span", "spacer"));
-  r4.appendChild(copyBtn("URL", e.base_url, "Copy the OpenAI-compatible base URL"));
-  if (e.models.length) r4.appendChild(copyBtn("model id", e.models[0], e.models[0]));
-  r4.appendChild(copyBtn("curl", e.curl, "Copy a ready-to-run chat completion request"));
-  row.appendChild(r4);
+  if (e.on_network) {
+    r4.appendChild(el("span", "accessbadge net", "network"));
+    r4.appendChild(el("code", "url", e.lan_url || e.base_url));
+    r4.appendChild(el("span", "spacer"));
+    r4.appendChild(copyBtn("URL", e.lan_url || e.base_url, "Copy the OpenAI-compatible base URL"));
+    if (e.models.length) r4.appendChild(copyBtn("model id", e.models[0], e.models[0]));
+    r4.appendChild(copyBtn("curl", e.curl, "Copy a ready-to-run chat completion request"));
+    row.appendChild(r4);
+    if (e.lan_verified === false) {
+      const w = el("div", "accessnote warn");
+      w.innerHTML = ICONS.warn;
+      w.appendChild(el("span", null,
+        "Bound to the network but not answering from the dashboard host — firewall?"));
+      row.appendChild(w);
+    }
+  } else {
+    // Loopback-only: hand over the tunnel, not a URL that would never resolve.
+    r4.appendChild(el("span", "accessbadge local", "local only"));
+    r4.appendChild(el("code", "url", e.listen_addrs && e.listen_addrs.length
+      ? `listening on ${e.listen_addrs.join(", ")}:${e.port}`
+      : `not reachable from the network`));
+    r4.appendChild(el("span", "spacer"));
+    r4.appendChild(copyBtn("tunnel", e.tunnel_cmd, "Copy an SSH port-forward command"));
+    r4.appendChild(copyBtn("URL", e.local_url, "The base URL once the tunnel is up"));
+    if (e.models.length) r4.appendChild(copyBtn("model id", e.models[0], e.models[0]));
+    row.appendChild(r4);
+    const hint = el("div", "accessnote");
+    hint.appendChild(el("code", "tunnelcmd", e.tunnel_cmd));
+    hint.appendChild(el("span", "dim", ` · or ${e.sync_hint}`));
+    row.appendChild(hint);
+  }
   return row;
 }
 
@@ -528,7 +556,12 @@ function renderTable(data) {
       tr.appendChild(el("td", "num", e && e.gen_tps !== null && e.gen_tps !== undefined ? fmt1(e.gen_tps) : "–"));
       tr.appendChild(el("td", "num", e && e.avg_latency_s ? fmt1(e.avg_latency_s) + "s" : "–"));
       const ep = el("td");
-      if (e) ep.appendChild(copyBtn(e.base_url, e.base_url, "Copy base URL"));
+      if (e && e.on_network) {
+        ep.appendChild(copyBtn(e.lan_url || e.base_url, e.lan_url || e.base_url, "Copy base URL"));
+      } else if (e) {
+        ep.appendChild(el("span", "accessbadge local", "local only"));
+        ep.appendChild(copyBtn("tunnel", e.tunnel_cmd, e.tunnel_cmd));
+      }
       tr.appendChild(ep);
       tb.appendChild(tr);
     });

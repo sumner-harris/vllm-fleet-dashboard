@@ -33,6 +33,29 @@ bound to `127.0.0.1` and containers on `--network host`, which a remote scan can
 | Open WebUI links | Resident + available models, VRAM, unload countdown (Ollama) |
 | Board model, host uptime | Copy buttons: base URL, model ID, ready-to-run `curl` |
 
+### Reachability: what works from where you're standing
+
+Discovery and reachability are separate questions, and the dashboard answers both.
+The agent reads `/proc/net/tcp` and `/proc/net/tcp6` for the LISTEN socket behind
+each port, so it knows whether a server is bound to all interfaces or only to
+loopback — without changing anything about how that server is run.
+
+| bound to | the row shows |
+|---|---|
+| `0.0.0.0` (vLLM, typically) | **NETWORK** badge, the LAN URL, copy buttons for URL / model ID / curl |
+| `127.0.0.1` (Ollama, under a no-auth policy) | **LOCAL ONLY** badge, what it is actually listening on, and a copy button for `ssh -N -L 11434:localhost:11434 <host>` — plus a note that NVIDIA Sync's Custom App does the same mapping |
+
+The dashboard then does a second, independent check: it tries each advertised LAN
+URL *from the dashboard host*. Bind scope says what the process intends; the probe
+says what actually works, so a firewall shows up too — a row bound to the network
+but not answering is flagged "Bound to the network but not answering from the
+dashboard host — firewall?". Set `verify_lan: false` in `config.yaml` to skip it.
+
+This is what makes the page engine-agnostic in practice. A colleague reading it gets
+the URL when there is a usable URL, and the tunnel command when there isn't —
+whether that endpoint is vLLM served to the whole network or Ollama kept on loopback
+because it has no authentication.
+
 ### Ollama and Open WebUI
 
 The agent also finds **Ollama** on each node — whether it runs as a systemd service
@@ -269,6 +292,8 @@ curl -s localhost:8080/api/fleet?history=false \
 | Ollama not showing up | Agent older than 1.3.0, or Ollama isn't on 11434 — set `FLEET_OLLAMA_PORTS` in the unit file. |
 | Ollama shows "nothing resident" | Normal: `keep_alive` expired and the models unloaded. The next request reloads one. |
 | Ollama row has no tok/s | Expected — Ollama publishes no metrics endpoint. |
+| "Bound to the network but not answering" | The server listens on 0.0.0.0 but the dashboard host can't reach it — almost always a firewall between the two. |
+| A row says LOCAL ONLY that you expect to be public | That server is bound to 127.0.0.1. Intentional for Ollama; for vLLM, check its `--host` flag. |
 | GPU stats missing, everything else fine | `nvidia-smi` isn't on PATH for the agent's user, or the agent isn't running as root. |
 | tok/s shows `–` | Needs two consecutive polls to derive a rate; it fills in after ~20s. |
 | Refresh button missing | That browser has no admin token — open the `?admin=<token>` link once. |

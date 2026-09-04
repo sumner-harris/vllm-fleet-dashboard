@@ -41,6 +41,8 @@ def ollama_entry(port, loaded_names, webui=None):
     return {
         "port": port,
         "engine": "ollama",
+        "bind_scope": "loopback",
+        "listen_addrs": ["127.0.0.1"],
         "engine_version": "0.12.4",
         "container": "ollama" if webui else None,
         "container_id": "0ll4m4c0nt",
@@ -113,7 +115,7 @@ def snapshot(node):
             is_vllm=True, model_arg=model, served_model_name=model,
             tensor_parallel_size=1, gpu_memory_utilization=0.9, max_model_len=32768))
         if down:
-            vllm.append(dict(engine="vllm", port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
+            vllm.append(dict(engine="vllm", bind_scope="all", listen_addrs=["0.0.0.0"], port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
                              image="vllm/vllm-openai:v0.10.1", uptime_s=None, restarts=4,
                              health=None, reachable=False, models=[],
                              error="Connection refused", metrics=None,
@@ -123,7 +125,7 @@ def snapshot(node):
             continue
         rate = 0.0 if mode == 6 else 120 + 90 * abs(math.sin(t / 31 + i + seed))
         vllm.append(dict(
-            engine="vllm", port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
+            engine="vllm", bind_scope="all", listen_addrs=["0.0.0.0"], port=port, container=cname, container_id=f"{seed:04x}{i}abcd12",
             image="vllm/vllm-openai:v0.10.1", uptime_s=int(t + 3600 * (6 + i)),
             restarts=1 if mode == 2 else 0, health="healthy", reachable=True,
             models=[{"id": model, "max_model_len": 32768, "owned_by": "vllm"}],
