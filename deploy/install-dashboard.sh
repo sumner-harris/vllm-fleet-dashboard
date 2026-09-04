@@ -8,6 +8,14 @@ PORT="${1:-8080}"
 DEST=/opt/vllm-fleet-dashboard
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Open WebUI's default is 8080 too, so check before claiming the port.
+if command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :${PORT} )" | grep -q LISTEN; then
+  echo "Port ${PORT} is already in use on this machine:" >&2
+  ss -ltnp "( sport = :${PORT} )" 2>/dev/null | tail -n +2 >&2
+  echo "Pick another, e.g.: sudo bash deploy/install-dashboard.sh 8088" >&2
+  exit 1
+fi
+
 [ -f "$SRC/config.yaml" ] || {
   echo "config.yaml not found in $SRC — copy config.example.yaml to config.yaml and fill in your machines first." >&2
   exit 1

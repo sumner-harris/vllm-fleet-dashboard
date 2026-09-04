@@ -13,7 +13,7 @@ T0 = time.time()
 COUNTERS = {}
 
 OLLAMA_TAGS = [
-    ("llama3.3:70b", 42520, "70.6B", "Q4_K_M"),
+    ("gpt-oss:120b", 62000, "116.8B", "MXFP4"),
     ("qwen2.5-coder:32b", 19850, "32.8B", "Q4_K_M"),
     ("gemma3:27b", 17400, "27.4B", "Q4_K_M"),
     ("mistral-small:24b", 14300, "23.6B", "Q4_K_M"),
@@ -88,11 +88,11 @@ FLEET = [
     dict(port=19904, host="zgx-01", gpu="NVIDIA GB10", mem=131072, unified=True,
          servers=[(8000, "google/gemma-3-27b-it", "vllm-gemma", 0),
                   (8100, "BAAI/bge-m3", "vllm-embed", 6)],
-         ollama=(11434, ["llama3.3:70b", "qwen2.5-coder:32b"]), webui=3000),
+         ollama=(11434, ["gpt-oss:120b", "qwen2.5-coder:32b"]), webui=8080),
     dict(port=19905, host="zgx-02", gpu="NVIDIA GB10", mem=131072, unified=True,
          servers=[(8000, "Qwen/Qwen3-32B", "vllm-qwen3", 0),
                   (8001, "openai/gpt-oss-20b", "vllm-gptoss", 2)],
-         ollama=(11434, []), webui=3000),   # idle Ollama: nothing resident
+         ollama=(11434, []), webui=8080),   # idle Ollama: nothing resident
 ]
 
 
@@ -146,7 +146,8 @@ def snapshot(node):
         oport, oloaded = node["ollama"]
         vllm.append(ollama_entry(oport, oloaded, webui=node.get("webui")))
     web_uis = ([{"name": "open-webui", "image": "ghcr.io/open-webui/open-webui:main",
-                 "port": node["webui"], "uptime_s": int(t) + 86400, "restarts": 0}]
+                 "port": node["webui"], "uptime_s": int(t) + 86400, "restarts": 0,
+                 "bind_scope": "loopback", "listen_addrs": ["127.0.0.1"]}]
                if node.get("webui") else [])
 
     return dict(

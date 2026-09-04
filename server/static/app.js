@@ -507,10 +507,22 @@ function nodeCard(node, history) {
   if ((node.web_uis || []).length) {
     const w = el("div", "webuis");
     node.web_uis.forEach((u) => {
-      const a = el("a", "webui");
-      a.href = u.url; a.target = "_blank"; a.rel = "noopener";
-      a.textContent = `${u.name || "web UI"} → :${u.port}`;
-      w.appendChild(a);
+      if (u.on_network) {
+        const a = el("a", "webui");
+        a.href = u.url; a.target = "_blank"; a.rel = "noopener";
+        a.textContent = `${u.name || "web UI"} → :${u.port}`;
+        if (u.lan_verified === false) a.title = "Not answering from the dashboard host";
+        w.appendChild(a);
+      } else {
+        // Loopback-bound (the usual --network host + SSH tunnel setup): hand
+        // over the tunnel rather than a link that resolves to the viewer's own
+        // machine.
+        const s = el("span", "webui local");
+        s.appendChild(document.createTextNode(`${u.name || "web UI"} :${u.port} · local only`));
+        w.appendChild(s);
+        w.appendChild(copyBtn("tunnel", u.tunnel_cmd,
+          `${u.tunnel_cmd}  —  then open ${u.local_url}`));
+      }
     });
     body.appendChild(w);
   }

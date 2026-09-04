@@ -721,6 +721,7 @@ def collect_webuis(containers: list[dict]) -> list[dict]:
                     "uptime_s": c["uptime_s"],
                     "restarts": c["restarts"],
                     "bind_scope": classify_bind(p.get("host_port"), listens)[0],
+                    "listen_addrs": classify_bind(p.get("host_port"), listens)[1],
                 }
             )
             break

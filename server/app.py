@@ -66,6 +66,8 @@ def load_config() -> dict:
                 "agent_token": node.get("agent_token") or raw.get("agent_token") or "",
                 "public_host": node.get("public_host") or node["host"],
                 "note": node.get("note") or "",
+                # so copied tunnel commands are paste-ready
+                "ssh_user": node.get("ssh_user") or raw.get("ssh_user") or "",
                 # Used when a node has no agent: probe these vLLM ports directly.
                 "vllm_ports": [int(p) for p in (node.get("vllm_ports") or [])],
                 "agent": node.get("agent", True),
@@ -260,7 +262,8 @@ def derive_endpoint(node: dict, entry: dict, now: float) -> dict:
     lan_url = f"http://{host}:{port}/v1" if on_network else None
     local_url = f"http://localhost:{port}/v1"
     base_url = lan_url or local_url
-    tunnel_cmd = f"ssh -N -L {port}:localhost:{port} {host}"
+    ssh_target = f"{node['ssh_user']}@{host}" if node.get("ssh_user") else host
+    tunnel_cmd = f"ssh -N -L {port}:localhost:{port} {ssh_target}"
     return {
         "port": entry["port"],
         "engine": engine,
@@ -330,17 +333,33 @@ def derive_node(node: dict, snapshot: dict | None, error: str | None, now: float
         derive_endpoint(node, e, now)
         for e in (snapshot.get("servers") or snapshot.get("vllm") or [])
     ]
-    web_uis = [
-        {
-            "name": w.get("name"),
-            "port": w.get("port"),
-            "url": f"http://{node['public_host']}:{w.get('port')}",
-            "uptime_s": w.get("uptime_s"),
-            "restarts": w.get("restarts"),
-        }
-        for w in (snapshot.get("web_uis") or [])
-        if w.get("port")
-    ]
+    web_uis = []
+    for w in (snapshot.get("web_uis") or []):
+        port = w.get("port")
+        if not port:
+            continue
+        scope = w.get("bind_scope") or "unknown"
+        on_net = scope in ("all", "specific")
+        host = node["public_host"]
+        ssh_target = f"{node['ssh_user']}@{host}" if node.get("ssh_user") else host
+        # Open WebUI is commonly run with --network host behind an SSH tunnel
+        # (see NVIDIA's DGX Spark guide), so offer the tunnel when it is not
+        # actually on the network — 3000 locally is the convention there.
+        web_uis.append(
+            {
+                "name": w.get("name"),
+                "port": port,
+                "bind_scope": scope,
+                "listen_addrs": w.get("listen_addrs") or [],
+                "on_network": on_net,
+                "url": f"http://{host}:{port}" if on_net else None,
+                "local_url": "http://localhost:3000",
+                "tunnel_cmd": f"ssh -N -L 3000:localhost:{port} {ssh_target}",
+                "uptime_s": w.get("uptime_s"),
+                "restarts": w.get("restarts"),
+                "lan_verified": None,
+            }
+        )
     gpus = snapshot.get("gpus") or []
 
     mem_total = sum(g.get("memory_total_mib") or 0 for g in gpus)
@@ -420,6 +439,13 @@ async def verify_lan(client: httpx.AsyncClient, nodes: list[dict]) -> None:
         except Exception:
             e["lan_verified"] = False
 
+    async def probe_ui(host: str, w: dict) -> None:
+        try:
+            r = await client.get(f"http://{host}:{w['port']}/", timeout=2.5)
+            w["lan_verified"] = r.status_code < 500
+        except Exception:
+            w["lan_verified"] = False
+
     tasks = []
     for n in nodes:
         for e in n["endpoints"]:
@@ -429,6 +455,11 @@ async def verify_lan(client: httpx.AsyncClient, nodes: list[dict]) -> None:
                 e["lan_verified"] = False   # loopback: known, no probe needed
                 continue
             tasks.append(probe(n["public_host"], e))
+        for w in n.get("web_uis") or []:
+            if not w["on_network"]:
+                w["lan_verified"] = False
+                continue
+            tasks.append(probe_ui(n["public_host"], w))
     if tasks:
         await asyncio.gather(*tasks)
 

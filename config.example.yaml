@@ -29,6 +29,10 @@ verify_lan: true
 # token isn't in a file other people may read.
 # admin_token: "change-me"
 
+# Optional: put your login in the SSH tunnel commands the dashboard offers for
+# loopback-only servers, so they are paste-ready. Per node, or once here.
+# ssh_user: "yourid"
+
 nodes:
   - name: spark-01
     host: 192.168.1.101      # IP or DNS name the dashboard uses to reach the agent

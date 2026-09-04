@@ -78,9 +78,21 @@ For each Ollama server you get:
 An idle Ollama has unloaded everything and reads **ready** in green — that is healthy,
 not down. It only goes red when `/api/version` stops answering.
 
-**Open WebUI** containers are detected too, and appear as a link on the node card
-(`open-webui → :3000`). They carry `OLLAMA_BASE_URL`, so they are classified before
-Ollama and never probed as a model server.
+**Open WebUI** containers are detected too, including the common
+`--network host` form from NVIDIA's DGX Spark guide, which puts it on **8080**.
+They carry `OLLAMA_BASE_URL`, so they are classified before Ollama and never probed
+as a model server. If Open WebUI is bound to the network the card shows a clickable
+link; if it is on loopback the card offers the tunnel instead —
+`ssh -N -L 3000:localhost:8080 <host>`, then open `http://localhost:3000`, which is
+exactly the mapping that guide describes.
+
+> **Port note:** Open WebUI's default is 8080 and so is this dashboard's. On a
+> machine running both, install the dashboard elsewhere —
+> `sudo bash deploy/install-dashboard.sh 8088`. The installer now refuses to claim
+> a port that is already listening.
+
+Set `ssh_user` in `config.yaml` (globally or per node) and every tunnel command the
+dashboard hands out is paste-ready: `ssh -N -L 11434:localhost:11434 you@10.123.23.31`.
 
 If Ollama listens somewhere other than 11434, set `FLEET_OLLAMA_PORTS=11434,11435`
 in that node's unit file.
